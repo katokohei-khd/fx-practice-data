@@ -1,0 +1,57 @@
+# 過去分の一括取り込み（最初に1回だけ手動で実行。作り直したいときも同じ）
+name: Backfill
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: data
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        symbol: [USDJPY, EURUSD, EURJPY, GBPJPY, GBPUSD, AUDJPY, AUDUSD, USDCHF, USDCAD, XAUUSD, USOIL, US30, USTECH, US500, BTCUSD]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - name: 取り込み
+        run: |
+          start=2015-01; [ "${{ matrix.symbol }}" = BTCUSD ] && start=2017-01
+          python scripts/build.py months ${{ matrix.symbol }} $start $(date -u -d yesterday +%Y-%m)
+        env:
+          CONC: '6'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: data-${{ matrix.symbol }}
+          path: data/${{ matrix.symbol }}
+  publish:
+    needs: fetch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: まとめる
+        run: |
+          rm -rf data && mkdir -p data
+          for d in artifacts/data-*; do mv "$d" "data/${d#artifacts/data-}"; done
+          python scripts/build.py finalize
+      - name: 公開（履歴を残さず1コミットで上書き）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan snapshot
+          git add -A scripts .github data README.md
+          git commit -q -m "データ更新 $(date -u +%Y-%m-%d)"
+          git push -f origin snapshot:main
