@@ -43,6 +43,9 @@ import urllib.error
 import urllib.request
 
 import numpy as np
+from zoneinfo import ZoneInfo
+
+NY = ZoneInfo("America/New_York")
 
 # 銘柄: (Dukascopyの名前, 価格の割り算, 小数桁, データ開始年)
 SYMBOLS = {
@@ -129,7 +132,8 @@ def day_bars(sym, day):
 
 def histdata_rows(sym, year, month=None):
     """HistData の1分足（1年分、または今年の1か月分）→ [(UTC分, 始, 高, 安, 終)]。
-    配布されていない期間は None。HistData の時刻は米国東部の標準時（夏時間なし、UTC-5）"""
+    配布されていない期間は None。HistData の時刻はニューヨーク時間（夏時間あり。冬はUTC-5、夏はUTC-4）。
+    ※ HistData の説明には「夏時間なし」とあるが、Dukascopy・OANDA と突き合わせると夏は1時間ずれるため、夏時間ありとして扱う"""
     pair, dig = HISTDATA[sym], SYMBOLS[sym][2]
     page = f"https://www.histdata.com/download-free-forex-historical-data/?/ascii/1-minute-bar-quotes/{pair}/{year}"
     if month:
@@ -156,11 +160,14 @@ def histdata_rows(sym, year, month=None):
             time.sleep(5 * (k + 1))
     else:
         raise RuntimeError(f"HistData 取得失敗 {sym} {year} {month}: {err}")
-    out, p = [], 10 ** dig
+    out, p, offset = [], 10 ** dig, {}
     for line in text.splitlines():
         ts, o, h, l, c = line.split(";")[:5]
         y, mo, d, hh, mm = int(ts[:4]), int(ts[4:6]), int(ts[6:8]), int(ts[9:11]), int(ts[11:13])
-        t = calendar.timegm((y, mo, d, hh, mm, 0)) // 60 + 300
+        key = (y, mo, d, hh)
+        if key not in offset:  # ニューヨーク時間とUTCの差（分）を1時間ごとに求める
+            offset[key] = -int(dt.datetime(y, mo, d, hh, tzinfo=NY).utcoffset().total_seconds()) // 60
+        t = calendar.timegm((y, mo, d, hh, mm, 0)) // 60 + offset[key]
         out.append((t, round(float(o) * p), round(float(h) * p), round(float(l) * p), round(float(c) * p)))
     return out
 
