@@ -1,0 +1,27 @@
+# 一時的な計測用（GitHubの実行環境から配信元への取得速度を測る）
+name: Speed probe
+on:
+  push:
+    branches: [speed-probe]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: measure
+        run: |
+          python3 - <<'PY'
+          import urllib.request, time, concurrent.futures as cf, datetime as dt, collections
+          def get(d):
+              u=f"https://datafeed.dukascopy.com/datafeed/AUDUSD/{d.year}/{d.month-1:02d}/{d.day:02d}/BID_candles_min_1.bi5"
+              t=time.time()
+              try:
+                  r=urllib.request.urlopen(urllib.request.Request(u,headers={"User-Agent":"Mozilla/5.0"}),timeout=60); r.read(); s=r.status
+              except Exception as e: s=getattr(e,"code",type(e).__name__)
+              return s, time.time()-t
+          days=[dt.date(2019,1,1)+dt.timedelta(i) for i in range(60)]
+          for conc in (1,4,12):
+              t=time.time()
+              with cf.ThreadPoolExecutor(conc) as ex: res=list(ex.map(get,days[:20*(1 if conc==1 else 2)]))
+              el=time.time()-t; c=collections.Counter(r[0] for r in res); avg=sum(r[1] for r in res)/len(res)
+              print(f"::notice::conc={conc} files={len(res)} total={el:.1f}s per_file_avg={avg:.2f}s files_per_s={len(res)/el:.2f} status={dict(c)}")
+          PY
