@@ -307,7 +307,7 @@ def cmd_fill(sym, pool=None):
     last = dt.datetime.fromtimestamp(bars[-1][0] * 60, dt.timezone.utc).date() if bars else yesterday - dt.timedelta(30)
     recent = bars[-1][0] - 15 * 1440 if bars else 0
     have = {dt.datetime.fromtimestamp(b[0] * 60, dt.timezone.utc).date() for b in bars if b[0] >= recent}
-    start = min(last, yesterday - dt.timedelta(9))
+    start = max(min(last, yesterday - dt.timedelta(9)), yesterday - dt.timedelta(14))
     days = [start + dt.timedelta(i) for i in range((yesterday - start).days + 1)]
     days = [d for d in days if d >= last or d not in have]
     if sym != "BTCUSD":
@@ -377,6 +377,46 @@ def cmd_btc():
     cmd_fill("BTCUSD")
 
 
+def month_counts(sym):
+    """月ごとの本数 {(年, 月): 本数}"""
+    c = {}
+    for b in all_bars(sym):
+        d = dt.datetime.fromtimestamp(b[0] * 60, dt.timezone.utc)
+        c[(d.year, d.month)] = c.get((d.year, d.month), 0) + 1
+    return c
+
+
+def gap_months(sym):
+    """データが無い・明らかに少ない月（ふつうの月の6割未満）。今月と、データ開始前は除く"""
+    c = month_counts(sym)
+    if not c:
+        return []
+    typical = sorted(c.values())[len(c) // 2]
+    this = today_utc()
+    start = (START_YEAR, 1) if sym != "BTCUSD" else (2017, 9)  # Binance の BTC は2017年8月中旬から
+    out = []
+    for y, m in months_between(f"{start[0]}-{start[1]:02d}", f"{this.year}-{this.month:02d}"):
+        if (y, m) == (this.year, this.month):
+            continue
+        if c.get((y, m), 0) < typical * 0.6 and not (m == 1 and c.get((y, m), 0) > typical * 0.4):
+            out.append((y, m))
+    return out
+
+
+def cmd_gaps(sym, shard, shards):
+    """欠けている月を Dukascopy で作り直す（shards 個に分けて並行するときは shard 番目の分だけ）。
+    時間がかかるので BUDGET 秒（既定50分）で打ち切り、残りは次回に回す"""
+    budget = time.time() + int(os.environ.get("BUDGET", "3000"))
+    todo = [ym for i, ym in enumerate(gap_months(sym)) if i % int(shards) == int(shard)]
+    print(f"::notice::{sym} 欠けている月 {len(todo)}件（この分担）: {todo[:12]}", flush=True)
+    with cf.ThreadPoolExecutor(CONC) as pool:
+        for y, m in todo:
+            if time.time() > budget:
+                print(f"::notice::{sym} 時間切れのため残りは次回", flush=True)
+                break
+            build_month(sym, y, m, pool)
+
+
 def cmd_recent():
     with cf.ThreadPoolExecutor(2) as pool:
         for sym in SYMBOLS:
@@ -438,6 +478,8 @@ def main():
         cmd_hist(sys.argv[2])
     elif c == "btc":
         cmd_btc()
+    elif c == "gaps":
+        cmd_gaps(*sys.argv[2:5])
     elif c == "fill":
         cmd_fill(sys.argv[2])
     elif c == "recent":

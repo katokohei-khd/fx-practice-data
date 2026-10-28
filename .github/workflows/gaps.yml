@@ -1,0 +1,78 @@
+# 欠けている月を少しずつ埋める（US30 と原油。Dukascopy が取得を制限するため、1回50分までで区切って繰り返す）
+# 欠けが無くなれば、すぐ終わるだけで何もしない
+name: Fill gaps
+on:
+  schedule:
+    - cron: '41 */3 * * *'   # 3時間ごと
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: data
+jobs:
+  fill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [US30, USOIL]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - name: 欠けている月を作る
+        run: |
+          mkdir -p out
+          find data/${{ matrix.symbol }} -name '*-*.bin' -printf '%f\n' | sort > before.txt
+          python scripts/build.py gaps ${{ matrix.symbol }} ${{ matrix.shard }} 8
+          # 作り直した月のファイルだけを渡す
+          for f in data/${{ matrix.symbol }}/*-*.bin; do
+            [ -e "$f" ] || continue
+            if ! grep -qx "$(basename $f)" before.txt || [ "$f" -nt before.txt ]; then cp "$f" out/; fi
+          done
+          ls out | head -50
+        env:
+          CONC: '2'
+          BUDGET: '3000'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gap-${{ matrix.symbol }}-${{ matrix.shard }}
+          path: out
+          if-no-files-found: ignore
+  publish:
+    needs: fill
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: まとめる
+        run: |
+          n=0
+          for d in artifacts/gap-*; do
+            [ -d "$d" ] || continue
+            sym=${d#artifacts/gap-}; sym=${sym%%-*}
+            for f in "$d"/*.bin; do [ -e "$f" ] && cp "$f" data/$sym/ && n=$((n+1)); done
+          done
+          echo "作り直した月: $n"
+          echo "N=$n" >> $GITHUB_ENV
+          python scripts/build.py finalize
+      - name: 公開（履歴を残さず1コミットで上書き）
+        if: env.N != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan snapshot
+          git add -A scripts .github data README.md
+          git commit -q -m "データ更新（欠けた月の補充） $(date -u +%Y-%m-%d)"
+          git push -f origin snapshot:main
