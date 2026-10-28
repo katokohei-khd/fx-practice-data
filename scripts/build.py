@@ -199,6 +199,11 @@ def cmd_recent():
                 build_month(sym, yy, mm, pool)
 
 
+def month_start(name):
+    """"YYYY-MM" → その月の1日0時（UTC分）"""
+    return int(dt.datetime(int(name[:4]), int(name[5:7]), 1, tzinfo=dt.timezone.utc).timestamp()) // 60
+
+
 def cmd_finalize():
     this_year = today_utc().year
     index = {"updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "symbols": {}}
@@ -207,12 +212,19 @@ def cmd_finalize():
         if not os.path.isdir(d):
             continue
         names = sorted(os.listdir(d))
-        # 終わった年は月ファイルを1年分にまとめる
+        # 終わった年は月ファイルを1年分にまとめる。すでに1年分のファイルがあれば、それに月の分を上書きで足す
+        # （1月の1〜3日は前年12月を作り直すので、12月だけで1年分を上書きしないように）
         for y in sorted({n[:4] for n in names if len(n) == 11}):
             if int(y) < this_year:
                 months = [n for n in names if n.startswith(y + "-")]
-                bars = [b for n in months for b in decode(open(os.path.join(d, n), "rb").read())]
-                write(os.path.join(d, f"{y}.bin"), sorted(set(bars)))
+                yfile = os.path.join(d, f"{y}.bin")
+                bars = {b[0]: b for b in decode(open(yfile, "rb").read())} if os.path.exists(yfile) else {}
+                for n in months:
+                    lo = month_start(n)
+                    hi = month_start(f"{int(n[:4]) + int(n[5:7]) // 12}-{int(n[5:7]) % 12 + 1:02d}")
+                    bars = {k: v for k, v in bars.items() if not lo <= k < hi}  # その月の古い分は捨てて作り直した分に替える
+                    bars.update({b[0]: b for b in decode(open(os.path.join(d, n), "rb").read())})
+                write(yfile, [bars[k] for k in sorted(bars)])
                 for n in months:
                     os.remove(os.path.join(d, n))
         names = sorted(os.listdir(d))
