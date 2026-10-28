@@ -40,7 +40,7 @@ SYMBOLS = {
 }
 DATA = os.environ.get("DATA_DIR", "data")
 CACHE = os.environ.get("RAW_CACHE")  # 指定すると取得したファイルを保存して再利用する
-CONC = int(os.environ.get("CONC", "6"))
+CONC = int(os.environ.get("CONC", "4"))
 URL = "https://datafeed.dukascopy.com/datafeed/"
 
 
@@ -48,13 +48,13 @@ def today_utc():
     return dt.datetime.now(dt.timezone.utc).date()
 
 
-def fetch(path):
+def fetch(path, use_cache=True):
     """1ファイル取得。無い日は b""。混雑や通信エラーは間隔を空けて取り直す"""
-    if CACHE:
+    if CACHE and use_cache:
         fn = os.path.join(CACHE, path.replace("/", "_"))
         if os.path.exists(fn):
             return open(fn, "rb").read()
-    for k in range(10):
+    for k in range(14):
         try:
             req = urllib.request.Request(URL + path, headers={"User-Agent": "Mozilla/5.0"})
             data = urllib.request.urlopen(req, timeout=60).read()
@@ -66,7 +66,7 @@ def fetch(path):
             err = e
         except Exception as e:  # 通信エラー
             err = e
-        time.sleep(min(60, 2 ** k) * (0.5 + random.random()))
+        time.sleep(min(120, 2 ** k) * (0.5 + random.random()))
     else:
         raise RuntimeError(f"取得失敗 {path}: {err}")
     if CACHE:
@@ -75,13 +75,28 @@ def fetch(path):
     return data
 
 
+FAILED = []
+
+
 def day_bars(sym, day):
-    """1日分の1分足 → [(UTC分, 始, 高, 安, 終)]。出来高0（休場中）の足は捨てる"""
+    """1日分の1分足 → [(UTC分, 始, 高, 安, 終)]。出来高0（休場中）の足は捨てる。
+    取得や展開に失敗した日は取り直し、それでもだめなら記録して空で続ける（1日の失敗で全体を止めない）"""
     duka, div, _, _ = SYMBOLS[sym]
-    raw = fetch(f"{duka}/{day.year}/{day.month - 1:02d}/{day.day:02d}/BID_candles_min_1.bi5")
-    if not raw:
+    path = f"{duka}/{day.year}/{day.month - 1:02d}/{day.day:02d}/BID_candles_min_1.bi5"
+    for k in range(3):
+        try:
+            raw = fetch(path, use_cache=(k == 0))
+            if not raw:
+                return []
+            d = lzma.decompress(raw, format=lzma.FORMAT_ALONE)
+            break
+        except Exception as e:
+            err = e
+            time.sleep(5 * (k + 1))
+    else:
+        print(f"::warning::{sym} {day} を取得できませんでした: {err}", flush=True)
+        FAILED.append((sym, day))
         return []
-    d = lzma.decompress(raw, format=lzma.FORMAT_ALONE)
     base = int(dt.datetime(day.year, day.month, day.day, tzinfo=dt.timezone.utc).timestamp()) // 60
     out = []
     for i in range(0, len(d) - 23, 24):
@@ -145,6 +160,13 @@ def build_month(sym, y, m, pool):
     if sym != "BTCUSD":
         days = [d for d in days if d.weekday() != 5]  # 土曜は休場
     rows = [r for day in pool.map(lambda d: day_bars(sym, d), days) for r in day]
+    # 失敗した日はもう一度だけ1件ずつ取り直す
+    retry = [d for s, d in FAILED if s == sym and d in days]
+    if retry:
+        time.sleep(30)
+        for d in retry:
+            FAILED.remove((sym, d))
+            rows += day_bars(sym, d)
     bars = to_m15(rows)
     write(os.path.join(DATA, sym, f"{y}-{m:02d}.bin"), bars)
     print(f"{sym} {y}-{m:02d}: {len(bars)}本", flush=True)
@@ -161,6 +183,8 @@ def cmd_months(sym, a, b):
     with cf.ThreadPoolExecutor(CONC) as pool:
         for y, m in months_between(a, b):
             build_month(sym, y, m, pool)
+    if FAILED:
+        print(f"::warning::取得できなかった日 {len(FAILED)}件: {FAILED[:20]}", flush=True)
 
 
 def cmd_recent():
@@ -207,7 +231,7 @@ def cmd_finalize():
     print("index:", {k: (len(v["files"]), v["last"]) for k, v in index["symbols"].items()})
 
 
-if __name__ == "__main__":
+def main():
     c = sys.argv[1]
     if c == "months":
         cmd_months(*sys.argv[2:5])
@@ -217,3 +241,13 @@ if __name__ == "__main__":
         cmd_finalize()
     else:
         sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc().strip().splitlines()
+        print(f"::error::{type(e).__name__}: {e} | " + " | ".join(tb[-6:]), flush=True)
+        raise

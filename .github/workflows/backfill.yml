@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 300
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 5
       matrix:
         symbol: [USDJPY, EURUSD, EURJPY, GBPJPY, GBPUSD, AUDJPY, AUDUSD, USDCHF, USDCAD, XAUUSD, USOIL, US30, USTECH, US500, BTCUSD]
     steps:
@@ -25,13 +25,15 @@ jobs:
           start=2015-01; [ "${{ matrix.symbol }}" = BTCUSD ] && start=2017-01
           python scripts/build.py months ${{ matrix.symbol }} $start $(date -u -d yesterday +%Y-%m)
         env:
-          CONC: '6'
+          CONC: '4'
       - uses: actions/upload-artifact@v4
+        if: always()   # 途中で失敗しても、できた月の分は残す
         with:
           name: data-${{ matrix.symbol }}
           path: data/${{ matrix.symbol }}
   publish:
     needs: fetch
+    if: ${{ !cancelled() }}   # 一部の銘柄が失敗しても、取れた分は公開する
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
