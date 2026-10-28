@@ -1,4 +1,4 @@
-# 一時的な計測用（GitHubの実行環境から配信元への取得速度を測る）
+# 一時的な計測用（別のデータ元に GitHub の実行環境から届くか確かめる）
 name: Speed probe
 on:
   push:
@@ -10,18 +10,32 @@ jobs:
       - name: measure
         run: |
           python3 - <<'PY'
-          import urllib.request, time, concurrent.futures as cf, datetime as dt, collections
-          def get(d):
-              u=f"https://datafeed.dukascopy.com/datafeed/AUDUSD/{d.year}/{d.month-1:02d}/{d.day:02d}/BID_candles_min_1.bi5"
-              t=time.time()
+          import urllib.request, urllib.parse, re, time, io, zipfile, http.cookiejar
+          UA={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
+          # HistData：年ごとの1分足（為替・金・原油・指数）
+          try:
+              cj=http.cookiejar.CookieJar();op=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+              page="https://www.histdata.com/download-free-forex-historical-data/?/ascii/1-minute-bar-quotes/usdjpy/2019"
+              t=time.time();html=op.open(urllib.request.Request(page,headers=UA),timeout=60).read().decode("utf-8","ignore")
+              tk=re.search(r'id="tk" value="([^"]+)"',html);print(f"::notice::histdata page ok {len(html)}B tk={'yes' if tk else 'no'} {time.time()-t:.1f}s")
+              data=urllib.parse.urlencode({"tk":tk.group(1),"date":"2019","datemonth":"2019","platform":"ASCII","timeframe":"M1","fxpair":"USDJPY"}).encode()
+              h=dict(UA,Referer=page,Origin="https://www.histdata.com")
+              t=time.time();z=op.open(urllib.request.Request("https://www.histdata.com/get.php",data=data,headers=h),timeout=120).read()
+              zf=zipfile.ZipFile(io.BytesIO(z));names=zf.namelist();csv=[n for n in names if n.endswith(".csv")][0]
+              lines=zf.read(csv).decode().splitlines()
+              print(f"::notice::histdata zip {len(z)//1024}KB {time.time()-t:.1f}s {csv} rows={len(lines)} first={lines[0]} last={lines[-1]}")
+              for sym in ["wtiusd","spxusd","nsxusd","xauusd"]:
+                  html=op.open(urllib.request.Request(page.replace("usdjpy",sym),headers=UA),timeout=60).read().decode("utf-8","ignore")
+                  print(f"::notice::histdata {sym} 2019 page tk={'yes' if 'id=\"tk\"' in html else 'no'}")
+              html=op.open(urllib.request.Request("https://www.histdata.com/download-free-forex-historical-data/?/ascii/1-minute-bar-quotes/usdjpy/2026",headers=UA),timeout=60).read().decode("utf-8","ignore")
+              print("::notice::histdata 2026 months: "+",".join(sorted(set(re.findall(r'/usdjpy/2026/(\d+)',html)))))
+          except Exception as e: print(f"::notice::histdata NG {type(e).__name__}: {e}")
+          # Binance：BTCの15分足（月ごと・日ごと）
+          for u in ["https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/15m/BTCUSDT-15m-2019-01.zip",
+                    "https://data.binance.vision/data/spot/daily/klines/BTCUSDT/15m/BTCUSDT-15m-2026-10-26.zip"]:
               try:
-                  r=urllib.request.urlopen(urllib.request.Request(u,headers={"User-Agent":"Mozilla/5.0"}),timeout=60); r.read(); s=r.status
-              except Exception as e: s=getattr(e,"code",type(e).__name__)
-              return s, time.time()-t
-          days=[dt.date(2019,1,1)+dt.timedelta(i) for i in range(60)]
-          for conc in (1,4,12):
-              t=time.time()
-              with cf.ThreadPoolExecutor(conc) as ex: res=list(ex.map(get,days[:20*(1 if conc==1 else 2)]))
-              el=time.time()-t; c=collections.Counter(r[0] for r in res); avg=sum(r[1] for r in res)/len(res)
-              print(f"::notice::conc={conc} files={len(res)} total={el:.1f}s per_file_avg={avg:.2f}s files_per_s={len(res)/el:.2f} status={dict(c)}")
+                  t=time.time();z=urllib.request.urlopen(urllib.request.Request(u,headers=UA),timeout=60).read()
+                  zf=zipfile.ZipFile(io.BytesIO(z));l=zf.read(zf.namelist()[0]).decode().splitlines()
+                  print(f"::notice::binance ok {u[-30:]} {len(z)//1024}KB {time.time()-t:.1f}s rows={len(l)} first={l[0][:60]}")
+              except Exception as e: print(f"::notice::binance NG {u[-30:]} {type(e).__name__}: {e}")
           PY
