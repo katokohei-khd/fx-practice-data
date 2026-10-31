@@ -1,0 +1,43 @@
+# 取り込みの途中でも、終わった銘柄の分だけ先に公開する（取り込みの実行番号を指定して手動で実行）
+name: Publish partial
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 取り込み（Backfill）の実行番号
+        required: true
+permissions:
+  contents: write
+  actions: read
+concurrency: publish
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: まとめる
+        run: |
+          rm -rf data && mkdir -p data
+          for d in artifacts/data-*; do
+            sym=${d#artifacts/data-}; sym=${sym%%-*}
+            mkdir -p data/$sym && cp -n "$d"/*.bin data/$sym/ 2>/dev/null || true
+          done
+          ls data
+          python scripts/build.py finalize
+      - name: 公開（履歴を残さず1コミットで上書き）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan snapshot
+          git add -A scripts .github data README.md
+          git commit -q -m "データ更新（途中公開） $(date -u +%Y-%m-%d)"
+          git push -f origin snapshot:main
