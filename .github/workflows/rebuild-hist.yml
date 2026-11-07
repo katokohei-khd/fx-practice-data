@@ -1,0 +1,54 @@
+# HistData から作る銘柄だけを作り直す（US30・BTC・原油の2024年以降など、ほかのデータはそのまま残す）
+name: Rebuild HistData symbols
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: data
+jobs:
+  hist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [USDJPY, EURUSD, EURJPY, GBPJPY, GBPUSD, AUDJPY, AUDUSD, USDCHF, USDCAD, XAUUSD, USOIL, USTECH, US500]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - run: rm -rf data && python scripts/build.py hist ${{ matrix.symbol }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: data-${{ matrix.symbol }}
+          path: data/${{ matrix.symbol }}
+  publish:
+    needs: hist
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: まとめる（作り直したファイルで上書き。それ以外のファイルは残す）
+        run: |
+          for d in artifacts/data-*; do
+            sym=${d#artifacts/data-}
+            mkdir -p data/$sym && cp "$d"/*.bin data/$sym/
+          done
+          python scripts/build.py finalize
+      - name: 公開（履歴を残さず1コミットで上書き）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan snapshot
+          git add -A scripts .github data README.md
+          git commit -q -m "データ更新（HistData分の作り直し） $(date -u +%Y-%m-%d)"
+          git push -f origin snapshot:main
