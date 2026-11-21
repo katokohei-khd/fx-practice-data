@@ -1,0 +1,29 @@
+# 毎日の更新：前日分を取り込んで公開する
+name: Daily update
+on:
+  schedule:
+    - cron: '23 1 * * *'   # 毎日 10:23（日本時間）
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: data
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - run: python scripts/build.py recent
+      - run: python scripts/build.py finalize
+      - name: 公開（履歴を残さず1コミットで上書き）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan snapshot
+          git add -A scripts .github data README.md
+          git commit -q -m "データ更新 $(date -u +%Y-%m-%d)"
+          git push -f origin snapshot:main

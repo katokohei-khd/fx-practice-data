@@ -1,0 +1,102 @@
+# 過去分の一括取り込み（最初に1回だけ手動で実行。作り直したいときも同じ）
+#   為替・金・原油・ナスダック・S&P500 … HistData（1年分を1ファイルで取得）＋直近の日を Dukascopy
+#   BTC                                … Binance（15分足を月ごとに取得）＋直近の日も Binance
+#   US30                               … Dukascopy の日ごとのファイル（年ごとに分けて並行）
+name: Backfill
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: data
+jobs:
+  hist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        symbol: [USDJPY, EURUSD, EURJPY, GBPJPY, GBPUSD, AUDJPY, AUDUSD, USDCHF, USDCAD, XAUUSD, USOIL, USTECH, US500]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - run: python scripts/build.py hist ${{ matrix.symbol }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: data-${{ matrix.symbol }}
+          path: data/${{ matrix.symbol }}
+
+  btc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - run: python scripts/build.py btc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: data-BTCUSD
+          path: data/BTCUSD
+
+  us30:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        year: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - name: 取り込み
+        run: |
+          y=${{ matrix.year }}; last=$y-12
+          [ "$y" = "$(date -u -d yesterday +%Y)" ] && last=$(date -u -d yesterday +%Y-%m)
+          python scripts/build.py months US30 $y-01 $last
+        env:
+          CONC: '2'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: data-US30-${{ matrix.year }}
+          path: data/US30
+
+  publish:
+    needs: [hist, btc, us30]
+    if: ${{ !cancelled() }}   # 一部が失敗しても、取れた分は公開する
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: まとめる
+        run: |
+          rm -rf data && mkdir -p data
+          for d in artifacts/data-*; do
+            sym=${d#artifacts/data-}; sym=${sym%%-*}
+            mkdir -p data/$sym && cp -n "$d"/*.bin data/$sym/ 2>/dev/null || true
+          done
+          python scripts/build.py finalize
+      - name: 公開（履歴を残さず1コミットで上書き）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan snapshot
+          git add -A scripts .github data README.md
+          git commit -q -m "データ更新 $(date -u +%Y-%m-%d)"
+          git push -f origin snapshot:main
